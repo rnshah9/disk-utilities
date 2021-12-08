@@ -40,6 +40,19 @@
 #include <libdisk/util.h>
 #include <private/disk.h>
 
+struct copylock_block {
+    uint32_t lfsr_seed;
+    uint8_t sec6_discontiguity;
+};
+
+struct copylock_info {
+    uint32_t lfsr_seed;
+    uint32_t latency[11];
+    uint32_t nr_valid_blocks;
+    unsigned int least_block;
+    uint8_t sec6_discontiguity;
+};
+
 static const uint16_t sync_list[] = {
     0x8a91, 0x8a44, 0x8a45, 0x8a51, 0x8912, 0x8911,
     0x8914, 0x8915, 0x8944, 0x8945, 0x8951 };
@@ -64,7 +77,7 @@ static uint8_t lfsr_state_byte(uint32_t x)
 
 /* Take LFSR state from start of one sector, to another. */
 static uint32_t lfsr_seek(
-    struct track_info *ti, uint32_t x, unsigned int from, unsigned int to)
+    struct copylock_info *info, uint32_t x, unsigned int from, unsigned int to)
 {
     unsigned int sz;
 
@@ -74,7 +87,7 @@ static uint32_t lfsr_seek(
         sz = 512;
         if (from == 6)
             sz -= sizeof(sec6_sig);
-        if ((ti->type == TRKTYP_copylock_old) && (from == 5))
+        if (info->sec6_discontiguity && (from == 5))
             sz += sizeof(sec6_sig);
         while (sz--)
             x = (from < to) ? lfsr_next_state(x) : lfsr_prev_state(x);
@@ -102,22 +115,16 @@ static bool_t sec6_discontiguity(struct track_info *ti)
 bool_t track_is_copylock(struct track_info *ti)
 {
     return ((ti->type == TRKTYP_copylock)
-            || (ti->type == TRKTYP_copylock_old)
-            || (ti->type == TRKTYP_copylock_old_variant));
+            || (ti->type == TRKTYP_copylock_old));
 }
 
-struct copylock_info {
-    uint32_t lfsr_seed;
-    uint32_t latency[11];
-    uint32_t nr_valid_blocks;
-    unsigned int least_block;
-};
-
 static void copylock_decode(
-    struct track_info *ti, struct stream *s, struct copylock_info *info)
+    struct track_info *ti, struct stream *s, struct copylock_info *info,
+    bool_t sec6_discontiguity)
 {
     memset(info, 0, sizeof(*info));
     info->least_block = ~0u;
+    info->sec6_discontiguity = sec6_discontiguity;
 
     while ((stream_next_bit(s) != -1) &&
            (info->nr_valid_blocks != ti->nr_sectors)) {
@@ -166,21 +173,32 @@ static void copylock_decode(
          * data. */
         lfsr = lfsr_sec =
             (info->lfsr_seed != 0)
-            ? lfsr_seek(ti, info->lfsr_seed, 0, sec)
+            ? lfsr_seek(info, info->lfsr_seed, 0, sec)
             : (dat[i] << 15) | (dat[i+8] << 7) | (dat[i+16] >> 1);
 
         /* Check that the data matches the LFSR-generated stream. */
         for (; i < 512; i++) {
-            if (dat[i] != lfsr_state_byte(lfsr))
-                break;
+            if (sec == 6)
+                printf("%02x ", dat[i]^lfsr_state_byte(lfsr));
+//            if (dat[i] != lfsr_state_byte(lfsr))
+//                break;
             lfsr = lfsr_next_state(lfsr);
         }
-        if (i != 512)
+        if (sec == 6) {
+            printf("\n\n");
+            for (i = 16; i < 512; i++) {
+                printf("%02x ", dat[i]);
+            }
+            printf("\n\n %08x \n\n", info->lfsr_seed);
+        }
+        if (i != 512) {
+            printf("%d %d %d\n", sec, sec6_discontiguity, i);
             continue;
+        }
 
         /* All good. Finally, stash the LFSR seed if we didn't know it. */
         if (info->lfsr_seed == 0) {
-            info->lfsr_seed = lfsr_seek(ti, lfsr_sec, sec, 0);
+            info->lfsr_seed = lfsr_seek(info, lfsr_sec, sec, 0);
             /* Paranoia: Reject the degenerate case of endless zero bytes. */
             if (info->lfsr_seed == 0)
                 continue;
@@ -203,22 +221,22 @@ static void *copylock_write_raw(
     struct track_info *ti = &d->di->track[tracknr];
     struct copylock_info info;
     unsigned int sec;
-    uint32_t *block;
+    struct copylock_block *block;
 
-    copylock_decode(ti, s, &info);
+    copylock_decode(ti, s, &info, FALSE);
 
     if (info.nr_valid_blocks == 0)
         return NULL;
 
     /* It varies as to whether the LFSR sector data continues across the
      * signature at the start of sector 6. We try to auto-detect that here. */
-    if ((ti->type == TRKTYP_copylock_old) && sec6_discontiguity(ti)) {
+    if (sec6_discontiguity(ti)) {
         struct track_info new_ti;
         struct copylock_info new_info;
         memset(&new_ti, 0, sizeof(new_ti));
-        init_track_info(&new_ti, TRKTYP_copylock_old_variant);
+        init_track_info(&new_ti, ti->type);
         stream_reset(s);
-        copylock_decode(&new_ti, s, &new_info);
+        copylock_decode(&new_ti, s, &new_info, TRUE);
         if (!sec6_discontiguity(&new_ti)) {
             /* Variant Copylock decode is an improvement, so let's use that. */
             info = new_info;
@@ -269,9 +287,10 @@ static void *copylock_write_raw(
         set_all_sectors_valid(ti);
     }
 
-    ti->len = 4;
+    ti->len = sizeof(*block);
     block = memalloc(ti->len);
-    *block = htobe32(info.lfsr_seed);
+    block->lfsr_seed = info.lfsr_seed;
+    block->sec6_discontiguity = info.sec6_discontiguity;
     return block;
 }
 
@@ -279,9 +298,14 @@ static void copylock_read_raw(
     struct disk *d, unsigned int tracknr, struct tbuf *tbuf)
 {
     struct track_info *ti = &d->di->track[tracknr];
-    uint32_t lfsr, lfsr_seed = be32toh(*(uint32_t *)ti->dat);
+    uint32_t lfsr;
+    struct copylock_block *block = (struct copylock_block *)ti->dat;
+    struct copylock_info info;
     unsigned int i, sec = 0;
     uint16_t speed = SPEED_AVG;
+
+    info.lfsr_seed = block->lfsr_seed;
+    info.sec6_discontiguity = block->sec6_discontiguity;
 
     tbuf_disable_auto_sector_split(tbuf);
 
@@ -300,7 +324,7 @@ static void copylock_read_raw(
         }
         tbuf_bits(tbuf, speed, bc_mfm, 8, sec);
         /* Data */
-        lfsr = lfsr_seek(ti, lfsr_seed, 0, sec);
+        lfsr = lfsr_seek(&info, info.lfsr_seed, 0, sec);
         for (i = 0; i < 512; i++) {
             if ((sec == 6) && (i == 0))
                 for (i = 0; i < sizeof(sec6_sig); i++)
@@ -328,13 +352,6 @@ struct track_handler copylock_handler = {
 };
 
 struct track_handler copylock_old_handler = {
-    .bytes_per_sector = 512,
-    .nr_sectors = 11,
-    .write_raw = copylock_write_raw,
-    .read_raw = copylock_read_raw
-};
-
-struct track_handler copylock_old_variant_handler = {
     .bytes_per_sector = 512,
     .nr_sectors = 11,
     .write_raw = copylock_write_raw,
