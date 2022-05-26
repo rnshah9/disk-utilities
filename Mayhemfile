@@ -1,0 +1,5 @@
+project: rnshah9/disk-utilities
+target: m68k-emulate
+
+cmds:
+  - cmd: /repo/m68k/m68k_emulate @@ out
