@@ -1,4 +1,4 @@
-project: rnshah9/disk-utilities
+project: disk-utilities
 target: m68k-emulate
 
 cmds:
