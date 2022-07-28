@@ -2,4 +2,4 @@ project: disk-utilities
 target: m68k-emulate
 
 cmds:
-  - cmd: /repo/m68k/m68k_emulate @@ out
+  - cmd: /m68k_emulate @@ out
