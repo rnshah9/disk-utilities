@@ -82,7 +82,7 @@ struct track_handler protec_longtrack_handler = {
 };
 
 /* TRKTYP_protoscan_longtrack: Lotus I/II, + many others
- *  u16 0x4124,0x4124
+ *  u16 0x4124,0x4124 (Mickey Mouse 0x4124,0x4324)
  *  Rest of track is (MFM-encoded) zeroes, and/or unformatted garbage.
  *  The contents are never checked, only successive sync marks are scanned for.
  * 
@@ -99,7 +99,8 @@ static void *protoscan_longtrack_write_raw(
 
     while (stream_next_bit(s) != -1) {
         ti->data_bitoff = s->index_offset_bc - 31;
-        if ((s->word != 0x41244124) || !check_sequence(s, 8, 0x00))
+        if ((s->word != 0x41244124 && s->word != 0x41244324) \
+            || !check_sequence(s, 8, 0x00))
             continue;
         if (ti->type != TRKTYP_tiertex_longtrack)
             ti->total_bits = 105500;
@@ -496,7 +497,7 @@ struct track_handler supermethanebros_longtrack_handler = {
     }
 };
 
-struct track_handler capone_protection_track_handler = {
+struct track_handler actionware_protection_handler = {
     .write_raw = gcr_protection_write_raw,
     .read_raw = gcr_protection_read_raw,
     .extra_data = & (struct gcr_protection_info) {
@@ -504,6 +505,60 @@ struct track_handler capone_protection_track_handler = {
         .bitlen = 100300
     }
 };
+
+/*
+ * Alternate Reality GCR Protection
+ * Long track (116778/2 GCR bits) but this isn't properly checked.
+ * 
+ * The protection checks for the pattern 0xcc96aa within the first 0x300
+ * bytes and if it finds it, it adds the offset of 0x1560 + offest of first 
+ * instance from the start of the raw data and checks for the same pattern.
+ * It then checks the next six bytes from the first instance against the
+ * next 6 bytes of the second instance and verifies they are the same.
+ * 
+ * The data between the gap is not checked and is was different in the 2
+ * dumps I tested against.
+ * 
+ * Filling the track with 0xffcc96aa passes the protection check.
+ */
+
+static void *alternate_reality_gcr_protection_write_raw(
+    struct disk *d, unsigned int tracknr, struct stream *s)
+{
+    struct track_info *ti = &d->di->track[tracknr];
+    const struct gcr_protection_info *info = handlers[ti->type]->extra_data;
+
+    /* GCR 4us bit time */
+    stream_set_density(s, 4000);
+
+    while (stream_next_bit(s) != -1) {
+        if (s->word == info->pattern)
+            break;
+    }
+
+    if (s->word != info->pattern)
+        goto fail;
+
+    /* We will generate a gap-less track, so make it a 32-bitcell multiple 
+     * starting exactly on the index. */
+    ti->total_bits = (info->bitlen/2) & ~31;
+    ti->data_bitoff = 0;
+    return memalloc(0);
+
+fail:
+    return NULL;
+}
+
+struct track_handler alternate_reality_gcr_protection_handler = {
+    .write_raw = alternate_reality_gcr_protection_write_raw,
+    .read_raw = gcr_protection_read_raw,
+    .extra_data = & (struct gcr_protection_info) {
+        .pattern = 0xffcc96aa,
+        .bitlen = 116778
+    }
+};
+
+
 /*
  * All MFM zeroes.
  */
@@ -681,6 +736,88 @@ struct track_handler gauntlet2_longtrack_handler = {
     .read_raw = gauntlet2_longtrack_read_raw
 };
 
+/* TRKTYP_ooops_up_protecton:
+ *  Looks for 1023 consecutive 0x4552 words right after the sync
+ */
+
+static void *ooops_up_protecton_write_raw(
+    struct disk *d, unsigned int tracknr, struct stream *s)
+{
+    struct track_info *ti = &d->di->track[tracknr];
+
+    while (stream_next_bit(s) != -1) {
+        if ((uint16_t)s->word != 0x4492)
+            continue;
+
+        if (!check_sequence(s, 1020, 0xbc))
+            continue;
+        if (!check_length(s, 100000))
+            break;
+
+        ti->data_bitoff = 0;
+        ti->total_bits = 100100;
+        return memalloc(0);
+    }
+    return NULL;
+}
+
+static void ooops_up_protecton_read_raw(
+    struct disk *d, unsigned int tracknr, struct tbuf *tbuf)
+{
+    unsigned int i;
+
+    tbuf_bits(tbuf, SPEED_AVG, bc_raw, 16, 0x4492);
+    for (i = 0; i < 1200; i++)
+        tbuf_bits(tbuf, SPEED_AVG, bc_raw, 16, 0x4552);
+}
+
+struct track_handler ooops_up_protecton_handler = {
+    .write_raw = ooops_up_protecton_write_raw,
+    .read_raw = ooops_up_protecton_read_raw
+};
+
+/* TRKTYP_cyberdos_protecton:
+ * The contents of the track are not checked, just the length of the
+ * track is checked
+ * 
+ * Tested with version 3.84 using the IPF
+ * Tested with version 4.01 with IPF and Fist of Fury edition from BarryB
+ * Version 4.16 does does not have a protection track and it is unformatted
+ * 
+ * Could have used Empty Longtrack instead, but wanted to keep the data and length
+ * like the original
+ */
+
+static void *cyberdos_protecton_write_raw(
+    struct disk *d, unsigned int tracknr, struct stream *s)
+{
+    struct track_info *ti = &d->di->track[tracknr];
+
+    while (stream_next_bit(s) != -1) {
+    
+        if (!check_length(s, 111000))
+            break;
+
+        ti->data_bitoff = 0;
+        ti->total_bits = 111320;
+        return memalloc(0);
+    }
+    return NULL;
+}
+
+static void cyberdos_protecton_read_raw(
+    struct disk *d, unsigned int tracknr, struct tbuf *tbuf)
+{
+    unsigned int i;
+    tbuf_bits(tbuf, SPEED_AVG, bc_mfm, 8, 0);
+    for (i = 0; i < 6900; i++)
+        tbuf_bits(tbuf, SPEED_AVG, bc_raw, 16, 0x9494);
+}
+
+struct track_handler cyberdos_protecton_handler = {
+    .write_raw = cyberdos_protecton_write_raw,
+    .read_raw = cyberdos_protecton_read_raw
+};
 
 /*
  * Local variables:

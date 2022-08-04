@@ -1,31 +1,26 @@
 /*
- * disk/cyberworld.c
+ * disk/world_championship_manager.c
  *
- * Custom format as used on Cyber World by Magic Bytes and 
- * Subtrade: Return To Irata from boeder.
+ * Custom format as used on World Championship Boxing Manager by Krisalis
  *
  * Written in 2022 by Keith Krellwitz
  *
  * RAW TRACK LAYOUT:
- *  u16 0x4489 Sync
- *  u16 0x2aaa 0x2aaa
- *  u32 dat[ti->len/4]
+ *  u16 0x8a51 :: Sync
+ *  u16 0x2aaa :: padding
+ *  u32 0xaaaaaaa5 :: padding - This value is checked
+ *  u32 dat[5632/4]
  *  u32 checksum
  *
- * TRKTYP_cyberworld data layout:
- *  u8 sector_data[5120]
  * 
- * TRKTYP_sub_trade_a data layout:
- *  u8 sector_data[6656]
- * 
- * TRKTYP_sub_trade_b data layout:
- *  u8 sector_data[6144]
+ * TRKTYP_world_championship_manager data layout:
+ *  u8 sector_data[5632]
  */
 
 #include <libdisk/util.h>
 #include <private/disk.h>
 
-static void *cyberworld_write_raw(
+static void *world_championship_boxing_write_raw(
     struct disk *d, unsigned int tracknr, struct stream *s)
 {
     struct track_info *ti = &d->di->track[tracknr];
@@ -36,15 +31,24 @@ static void *cyberworld_write_raw(
         unsigned int i;
         char *block;
 
-        if ((uint16_t)s->word != 0x4489)
+        /* sync */
+        if ((uint16_t)s->word != 0x8a51)
             continue;
         ti->data_bitoff = s->index_offset_bc - 15;
 
+        /* padding */
         if (stream_next_bits(s, 16) == -1)
             goto fail;
         if ((uint16_t)s->word != 0x2aaa)
             continue;
 
+        /* padding - check by loader */
+        if (stream_next_bits(s, 32) == -1)
+            goto fail;
+        if (s->word != 0xaaaaaaa5)
+            continue;
+
+        /* data */
         for (i = sum = 0; i < ti->len/4; i++) {
             if (stream_next_bytes(s, raw, 8) == -1)
                 goto fail;
@@ -52,12 +56,19 @@ static void *cyberworld_write_raw(
             sum += be32toh(dat[i]);
         }
 
+        /* checksum */
         if (stream_next_bytes(s, raw, 8) == -1)
             goto fail;
         mfm_decode_bytes(bc_mfm_even_odd, 4, raw, &csum);
 
-        if (be32toh(csum) != sum)
-            goto fail;
+        /* game can corrupt the disk on track 40 if you loaded a 
+        saved game and one did not exist */
+        if (be32toh(csum) != sum) {
+            if (tracknr != 40)
+                goto fail;
+            else
+                trk_warn(ti, tracknr, "The track cheksums do not match!\nPossible Cause: loading a saved game and one does not exist, which can corrupted the original disk");
+        }
 
         stream_next_index(s);
         block = memalloc(ti->len);
@@ -71,43 +82,39 @@ fail:
     return NULL;
 }
 
-static void cyberworld_read_raw(
+static void world_championship_boxing_read_raw(
     struct disk *d, unsigned int tracknr, struct tbuf *tbuf)
 {
     struct track_info *ti = &d->di->track[tracknr];
     uint32_t *dat = (uint32_t *)ti->dat, sum;
     unsigned int i;
 
-    tbuf_bits(tbuf, SPEED_AVG, bc_raw, 16, 0x4489);
+    /* sync */
+    tbuf_bits(tbuf, SPEED_AVG, bc_raw, 16, 0x8A51);
+
+    /* padding */
     tbuf_bits(tbuf, SPEED_AVG, bc_raw, 16, 0x2aaa);
 
+    /* padding */
+    tbuf_bits(tbuf, SPEED_AVG, bc_raw, 32, 0xaaaaaaa5);
+
+    /* data */
     for (i = sum = 0; i < ti->len/4; i++) {
         tbuf_bits(tbuf, SPEED_AVG, bc_mfm_even_odd, 32, be32toh(dat[i]));
         sum += be32toh(dat[i]);
     }
-   tbuf_bits(tbuf, SPEED_AVG, bc_mfm_even_odd, 32, sum);
+
+    /* cheksum */
+    tbuf_bits(tbuf, SPEED_AVG, bc_mfm_even_odd, 32, sum);
 }
 
-struct track_handler cyberworld_handler = {
-    .bytes_per_sector = 5120,
+struct track_handler world_championship_boxing_handler = {
+    .bytes_per_sector = 5632,
     .nr_sectors = 1,
-    .write_raw = cyberworld_write_raw,
-    .read_raw = cyberworld_read_raw
+    .write_raw = world_championship_boxing_write_raw,
+    .read_raw = world_championship_boxing_read_raw
 };
 
-struct track_handler sub_trade_a_handler = {
-    .bytes_per_sector = 6656,
-    .nr_sectors = 1,
-    .write_raw = cyberworld_write_raw,
-    .read_raw = cyberworld_read_raw
-};
-
-struct track_handler sub_trade_b_handler = {
-    .bytes_per_sector = 6144,
-    .nr_sectors = 1,
-    .write_raw = cyberworld_write_raw,
-    .read_raw = cyberworld_read_raw
-};
 
 
 /*
