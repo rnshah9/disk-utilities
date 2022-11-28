@@ -51,7 +51,8 @@ jobs:
       fail-fast: false
       matrix:
         mayhemfile:
-          - mayhem/Mayhemfile
+          - mayhem/Mayhemfile_rnd16
+          - mayhem/Mayhemfile_m68k_emulate
 
     steps:
       - uses: actions/checkout@v2

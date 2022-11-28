@@ -1,0 +1,5 @@
+project: disk-utilities
+target: rnd16
+
+cmds:
+  - cmd: /fuzz_rnd16
